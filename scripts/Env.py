@@ -1,10 +1,9 @@
 import numpy as np
+import pandas as pd
 from gym import spaces
 from gym_trading_env.environments import TradingEnv
 
 import torch
-
-
 
 
 class POMDPTEnv(TradingEnv):
@@ -22,12 +21,14 @@ class POMDPTEnv(TradingEnv):
             high=np.inf, 
             shape=(4 + 4 * window_size,), # OHLCV + 2 indicators + account
             )
-        self.action_space = spaces.Discrete(3) # buy or sell
+        self.action_space = spaces.Discrete(2) # buy or sell
 
         # Reward variables
         self.eta = eta
         self.alpha = alpha
         self.beta = beta
+
+        self.cumulative_profit = 0 
 
         # Initialize
         self.vectorize()
@@ -41,13 +42,13 @@ class POMDPTEnv(TradingEnv):
         lc = self.close_rolling_min[idx]
         ll = self.low_rolling_min[idx]
 
-        if np.isnan(hh) or np.isnan(hc) or np.isnan(lc) or np.isnan(ll):
+        if np.isnan(hh) or np.isnan(hc) or np.isnan(lc) or np.isnan(ll): # Check necessary for first window_size steps
             #set them to open price so that range = 0
             hh = hc = lc = ll = self.opens[idx]
 
         self.range = max(hh - lc, hc - ll)
-        self.buy_line = self.df['open'].iloc[-1] + k1 * self.range
-        self.sell_line = self.df['open'].iloc[-1] - k2 * self.range
+        self.buy_line = self.opens[idx] + k1 * self.range
+        self.sell_line = self.opens[idx] - k2 * self.range
 
     def _compute_differential_sharpe_ratio(self, reward, eps=1e-6):
         delta_alpha = reward - self.alpha
@@ -79,7 +80,7 @@ class POMDPTEnv(TradingEnv):
         self._compute_dual_thrust()
         indicators = [self.buy_line, self.sell_line]
 
-        account = [self.position, self.balance/self.initial_balance]
+        account = [self.position, self.cumulative_profit]
         return np.concatenate((prices, indicators, account))
     
     def reset(self):
@@ -107,49 +108,42 @@ class POMDPTEnv(TradingEnv):
         self.low_rolling_min   = self.df['low'].rolling(self.window_size).min().values
 
 
-
     def step(self, action):
             done = False
             if self.current_step >= len(self.df) - 1:
                 done = True
             
-            if action == 1:
-                desired_position = 1
-            elif action == 2:
-                desired_position = -1
-            else:
-                desired_position = self.position
+            desired_position = 1 if action == 0 else -1
 
             price_open = self.opens[self.current_step]
+            prev_close = self.closes[self.current_step-1]
+            prev_position = self.position
             
-            # Close hold open new
-            if desired_position != self.position:
-                # close old
-                if self.position != 0:
-                    old_pnl = (price_open - self.entry_price) * self.position
-                    cost = (abs(self.position - desired_position) * self.transaction_cost * price_open 
-                            + abs(self.position)*self.slippage)
-                    self.balance += old_pnl - cost
-                
-                # open new
-                if desired_position != 0:
-                    self.entry_price = price_open
-                    cost = (abs(self.position - desired_position) * self.transaction_cost * price_open
-                            + abs(desired_position)*self.slippage)
-                    self.balance -= cost
-                
-                self.position = desired_position
+            # Close old
+            if prev_position != 0:
+                old_pnl = (price_open - self.entry_price) * prev_position
+                self.balance += old_pnl - (abs(prev_position) * self.transaction_cost)
             
+            # Open new
+            cost = abs(desired_position) * (self.transaction_cost * price_open + self.slippage)
+            self.balance -= cost
+            self.position = desired_position
+            self.entry_price = price_open
+            
+            price_close = self.closes[self.current_step]
+            # Eq (1) in the paper
+            rt = (price_close - prev_close - 2 * self.slippage) * prev_position - \
+                    (abs(desired_position) * self.transaction_cost * price_open)
+
+            self.cumulative_profit += rt
+            
+            dsr = self._compute_differential_sharpe_ratio(rt)
+            obs = self._next_observation()  if not done else np.zeros(self.observation_space.shape, dtype=np.float32)
+
             # next step
             self.current_step += 1
             if self.current_step < len(self.df):
                 self._compute_dual_thrust()
-            
-            price_close = self.closes[self.current_step-1]
-            step_pnl = (price_close - self.entry_price) * self.position
-            
-            dsr = self._compute_differential_sharpe_ratio(step_pnl)
-            obs = self._next_observation()  if not done else np.zeros(self.observation_space.shape, dtype=np.float32)
             
             if self.balance <= 0:
                 done = True
@@ -170,33 +164,40 @@ def dt_policy(env):
     curr = env.opens[env.current_step]
 
     if curr > buy_line:
-        return 1
-    elif curr < sell_line:
-        return 2
-    else:
         return 0
+    elif curr < sell_line:
+        return 1
     
 
-def intraday_greedy_actions(env_df, window_size=60, device="cuda"):
+def intraday_greedy_actions(env, device="cuda"):
 
-    num_steps = len(env_df)
-    day_len = 240  
+    day_len = compute_day_length(env.df)  
 
-    open_prices = torch.tensor(env_df["open"].values, dtype=torch.float32, device=device)
-    actions = torch.zeros(num_steps, dtype=torch.int, device=device)
+    open_prices = env.opens
+    close_prices = env.closes
+    num_steps = len(open_prices)
+    actions = np.zeros(num_steps, dtype=int)
 
-    i = window_size
+    i = env.window_size
     while i < (num_steps - 1):
         day_start = i
         day_end = min(i + day_len, num_steps)
         
         day_opens = open_prices[day_start:day_end]
-        idx_min = torch.argmin(day_opens).item()  # Buy
-        idx_max = torch.argmax(day_opens).item()  # Sell
+        day_closes = close_prices[day_start:day_end]
+        idx_min = np.argmin(day_opens).item()  # Buy
+        idx_max = np.argmax(day_closes).item()  # Sell
 
-        actions[day_start + idx_min] = 1  # Long
-        actions[day_start + idx_max] = 2  # Short
+        actions[day_start + idx_min] = 0  # Long
+        actions[day_start + idx_max] = 1  # Short
 
         i = day_end  
 
     return actions
+
+def compute_day_length(df):
+
+    timestamps = df['timestamp']
+    time_diffs = timestamps.diff().dropna()
+    day_len = time_diffs[time_diffs > pd.Timedelta(minutes=1)].count()  # Count intraday steps
+    return day_len
