@@ -21,7 +21,12 @@ class POMDPTEnv(TradingEnv):
             high=np.inf, 
             shape=(4 + 4 * window_size,), # OHLCV + 2 indicators + account
             )
-        self.action_space = spaces.Discrete(2) # buy or sell
+        self.action_space = spaces.Box(
+            low=0, 
+            high=1, 
+            shape=(2,), 
+            dtype=np.float32
+        ) # [P long, P short]
 
         # Reward variables
         self.eta = eta
@@ -49,6 +54,7 @@ class POMDPTEnv(TradingEnv):
         self.range = max(hh - lc, hc - ll)
         self.buy_line = self.opens[idx] + k1 * self.range
         self.sell_line = self.opens[idx] - k2 * self.range
+
 
     def _compute_differential_sharpe_ratio(self, reward, eps=1e-6):
         delta_alpha = reward - self.alpha
@@ -81,7 +87,7 @@ class POMDPTEnv(TradingEnv):
         indicators = [self.buy_line, self.sell_line]
 
         account = [self.position, self.cumulative_profit]
-        return np.concatenate((prices, indicators, account))
+        return np.concatenate([prices, indicators, account])
     
     def reset(self):
         self.current_step = self.window_size
@@ -113,37 +119,32 @@ class POMDPTEnv(TradingEnv):
             if self.current_step >= len(self.df) - 1:
                 done = True
             
-            desired_position = 1 if action == 0 else -1
+            desired_position = 1 if action[0] > action[1] else -1
 
             price_open = self.opens[self.current_step]
+            price_close = self.closes[self.current_step]
             prev_close = self.closes[self.current_step-1]
             prev_position = self.position
+
+            # Eq (1)
+            rt = (price_close - prev_close - 2 * self.slippage) * prev_position - \
+                    (abs(desired_position - prev_position) * self.transaction_cost * price_close)
             
-            # Close old
-            if prev_position != 0:
-                old_pnl = (price_open - self.entry_price) * prev_position
-                self.balance += old_pnl - (abs(prev_position) * self.transaction_cost)
-            
-            # Open new
-            cost = abs(desired_position) * (self.transaction_cost * price_open + self.slippage)
-            self.balance -= cost
+            self.balance += rt
             self.position = desired_position
             self.entry_price = price_open
-            
-            price_close = self.closes[self.current_step]
-            # Eq (1) in the paper
-            rt = (price_close - prev_close - 2 * self.slippage) * prev_position - \
-                    (abs(desired_position) * self.transaction_cost * price_open)
 
             self.cumulative_profit += rt
             
             dsr = self._compute_differential_sharpe_ratio(rt)
-            obs = self._next_observation()  if not done else np.zeros(self.observation_space.shape, dtype=np.float32)
 
             # next step
             self.current_step += 1
             if self.current_step < len(self.df):
                 self._compute_dual_thrust()
+                obs = self._next_observation()
+            else:
+                obs = np.zeros(self.observation_space.shape[0], dtype=np.float32)
             
             if self.balance <= 0:
                 done = True
@@ -155,21 +156,27 @@ class POMDPTEnv(TradingEnv):
 
 def dt_policy(env):
 
-    o = env._next_observation()
-    n = env.window_size
-
-    buy_line = o[4*n]
-    sell_line= o[4*n + 1]
+    buy_line = env.buy_line
+    sell_line= env.sell_line
 
     curr = env.opens[env.current_step]
 
+    action = np.zeros(2, dtype=np.float32)
+
     if curr > buy_line:
-        return 0
+        action[0] = 1.0 # Long
     elif curr < sell_line:
-        return 1
+        action[1] = 1.0 # Short
+    else: # Do nothing
+        if env.position == 1:
+            action[0] = 1.0
+        elif env.position == -1:
+            action[1] = 1.0
+    
+    return action
     
 
-def intraday_greedy_actions(env, device="cuda"):
+def intraday_greedy_actions(env):
 
     day_len = compute_day_length(env.df)  
 
@@ -197,7 +204,7 @@ def intraday_greedy_actions(env, device="cuda"):
 
 def compute_day_length(df):
 
-    timestamps = df['timestamp']
+    timestamps = pd.to_datetime(df['timestamp'])
     time_diffs = timestamps.diff().dropna()
     day_len = time_diffs[time_diffs > pd.Timedelta(minutes=1)].count()  # Count intraday steps
     return day_len

@@ -4,12 +4,12 @@ import copy
 import torch
 import torch.nn as nn
 
-from tqdm import trange
+from tqdm import trange, tqdm
 
-from Env import POMDPTEnv, dt_policy 
+from scripts.Env import intraday_greedy_actions, dt_policy
+
 
 # EPISODES 
-
 class Episode:
     def __init__(self):
         self.obs = []
@@ -74,16 +74,15 @@ class iRDPGAgent(nn.Module):
                  obs_dim, 
                  action_dim=2, 
                  hidden_dim=64, 
-                 gamma=0.99,
                  tau=0.001,
                  device="cuda"):
         super().__init__()
 
-        self.actor_gru = nn.GRU(obs_dim, hidden_dim, batch_first=True) 
-        self.actor_fc = nn.Linear(hidden_dim, action_dim) # [P long, P short]
+        self.actor_gru = nn.GRU(obs_dim, hidden_dim, batch_first=True).to(device)
+        self.actor_fc = nn.Linear(hidden_dim, action_dim).to(device) # [P long, P short]
 
-        self.critic_gru = nn.GRU(obs_dim + action_dim, hidden_dim, batch_first=True)
-        self.critic_fc = nn.Linear(hidden_dim, 1)
+        self.critic_gru = nn.GRU(obs_dim + action_dim, hidden_dim, batch_first=True).to(device)
+        self.critic_fc = nn.Linear(hidden_dim, 1).to(device)
 
         # Target networks
         self.target_actor = copy.deepcopy(self.actor_gru)
@@ -92,12 +91,17 @@ class iRDPGAgent(nn.Module):
         self.target_critic_fc = copy.deepcopy(self.critic_fc)
 
         # Initalize target networks
-        self._update_target_networks(1.0)
+        self.target_actor.flatten_parameters()
+        self.target_critic.flatten_parameters()
+
+        self._update_target_networks(tau)
 
         self.device = device
 
     def forward(self, obs, h_actor=None, h_critic=None):
         obs = obs.to(self.device)
+        h_actor = h_actor.to(self.device) if h_actor is not None else None
+        h_critic = h_critic.to(self.device) if h_critic is not None else None
         
         # Actor
         z_actor, h_actor_next = self.actor_gru(obs, h_actor)
@@ -110,31 +114,46 @@ class iRDPGAgent(nn.Module):
         return action_probs, q_value, h_actor_next, h_critic_next
     
     def target_forward(self, obs, h_actor=None, h_critic=None):
-        obs = obs.to(self.device)
+        obs = obs.to(self.device).contiguous()
+        h_actor = h_actor.to(self.device).contiguous() if h_actor is not None else None
+        h_critic = h_critic.to(self.device).contiguous() if h_critic is not None else None
 
         # Target actor
         z_actor, h_actor_next = self.target_actor(obs, h_actor)
-        target_action_probs = torch.softmax(self.target_actor_fc(z_actor))
+        target_action_probs = torch.sigmoid(self.target_actor_fc(z_actor))
 
         # Target critic
-        z_critic, h_critic_next = self.target_critic(torch.concat([obs, target_action_probs.detac()], dim=-1), h_critic)
+        z_critic, h_critic_next = self.target_critic(torch.concat([obs, target_action_probs.detach()], dim=-1).contiguous(), h_critic)
         target_q_value = self.target_critic_fc(z_critic)
 
         return target_action_probs, target_q_value, h_actor_next, h_critic_next
+    
+    
+    def critic_forward(self, obs, action, h_critic=None):
+        obs = obs.to(self.device)
+        action = action.to(self.device)
+        h_critic = h_critic.to(self.device) if h_critic is not None else None
+
+        z_critic, h_critic_next = self.critic_gru(torch.concat([obs, action], dim=-1), h_critic)
+        q_value = self.critic_fc(z_critic)
+
+        return q_value, h_critic_next
         
     
     def act(self, obs, h_actor=None, add_noise=True):
 
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        h_actor = h_actor.to(self.device) if h_actor is not None else None
 
         with torch.no_grad():
             action_probs, _, h_actor_next, _ = self.forward(obs, h_actor)
             
-            if add_noise:
-                noise = torch.randn_like(action_probs) * 0.1 # 0.1 is the std
-                action_probs = torch.clamp(action_probs + noise, 0, 1)
+        action = action_probs.squeeze(0).cpu().numpy()
 
-            action = action_probs.argmax(-1).item()
+        if add_noise:
+            noise = np.random.normal(0, 0.1, size=action.shape)
+            action = np.clip(action + noise, 0, 1)
+
             
         return action, h_actor_next
     
@@ -148,56 +167,69 @@ class iRDPGAgent(nn.Module):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
         for target_param, param in zip(self.target_critic_fc.parameters(), self.critic_fc.parameters()):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+
+def generate_demonstration_episodes(env, n_episodes=50):
+    episodes = []
+    for _ in trange(n_episodes, desc='Generating Demonstrations'):
+        env.reset()
+        episode = Episode()
+        episode.is_demo = True
+        done = False
+
+        expert_action = intraday_greedy_actions(env)
+
+        expert_action_one_hot = np.zeros((len(expert_action), 2), dtype=np.float32)
+        for i, a in enumerate(expert_action):
+            if a == 0:
+                expert_action_one_hot[i] = [1.0, 0.0]
+            elif a == 1:
+                expert_action_one_hot[i] = [0.0, 1.0]
+            else:
+                raise ValueError(f"Invalid action: {a}")
+        
+        
+        while not done:
+            action = dt_policy(env)
+            obs, reward, done, _ = env.step(action)
             
+            episode.obs.append(obs)
+            episode.actions.append(action)
+            episode.rewards.append(reward)
+            episode.expert_actions.append(expert_action_one_hot[env.current_step-1])
+            episode.dones.append(done)
+        
+        episodes.append(episode)
+    return episodes
 
-# UTILS
-
-def collect_episode(env, agent, noise, device="cuda"):
-
-    ep = Episode()
-    obs = env.reset()
+def collect_episode(env, agent, add_noise):
+    env.reset()
+    episode = Episode()
+    h_actor = None
     done = False
 
-    dummy_action = torch.zeros((1,1), dtype=torch.int64, device=device)
-    
-    while not done:
+    expert_action = intraday_greedy_actions(env)
+    expert_action_one_hot = np.zeros((len(expert_action), 2), dtype=np.float32)
+    for i, a in enumerate(expert_action):
+        if a == 0:
+            expert_action_one_hot[i] = [1.0, 0.0]
+        elif a == 1:
+            expert_action_one_hot[i] = [0.0, 1.0]
+        else:
+            raise ValueError(f"Invalid action: {a}")
 
-        with torch.no_grad():
-            obs_t = torch.tensor(obs, dtype=torch.float, device=device).view(1,1,-1)
-            logits, Q_vals, _, _ = agent(obs_t, dummy_action)
-            # pick a policy action
-            probs = torch.softmax(logits[0,0,:], dim=-1)
-            if noise:
-                dist = torch.distributions.Categorical(probs)
-                action = dist.sample().item()
-            else:
-                action = probs.argmax().item()
+    while not done:
+        obs = env._next_observation()
+        action, h_actor = agent.act(obs, h_actor, add_noise=add_noise)
         
         next_obs, reward, done, _ = env.step(action)
         
-        ep.obs.append(obs)
-        ep.actions.append(action)
-        ep.rewards.append(reward)
-        ep.done_flags.append(done)
-        
-        obs = next_obs
-    
-    return ep
+        episode.obs.append(obs)
+        episode.actions.append(action)
+        episode.rewards.append(reward)
+        episode.expert_actions.append(expert_action_one_hot[env.current_step-1])
+        episode.dones.append(done)
 
-def collect_demonstrations(df, window_size=60, n_episodes=50):
-    demos = []
-    env = POMDPTEnv(df, window_size=window_size)
-    for _ in trange(n_episodes, desc="Collecting Demonstrations"):
-        ep = Episode()
-        obs = env.reset()
-        done = False
-        while not done:
-            a = dt_policy(env)
-            next_obs, rew, done, _ = env.step(a)
-            ep.obs.append(obs)
-            ep.actions.append(a)
-            ep.rewards.append(rew)
-            ep.done_flags.append(done)
-            obs = next_obs
-        demos.append(ep)
-    return demos
+        obs = next_obs
+        
+    return episode
+            
