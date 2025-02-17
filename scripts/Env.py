@@ -7,7 +7,7 @@ import torch
 
 
 class POMDPTEnv(TradingEnv):
-    def __init__(self, df, window_size=60, initial_balance=100_000,transaction_cost=2.3e-5, slippage=0.2, eta=0.01, alpha=0, beta=0):
+    def __init__(self, df, window_size=60, initial_balance=100_000,transaction_cost=2.3e-5, slippage=0.2, eta=0.01):
         super().__init__(df=df)
         
         self.df = df
@@ -20,6 +20,7 @@ class POMDPTEnv(TradingEnv):
             low=-np.inf, 
             high=np.inf, 
             shape=(4 + 4 * window_size,), # OHLCV + 2 indicators + account
+            dtype=np.float32
             )
         self.action_space = spaces.Box(
             low=0, 
@@ -30,8 +31,8 @@ class POMDPTEnv(TradingEnv):
 
         # Reward variables
         self.eta = eta
-        self.alpha = alpha
-        self.beta = beta
+        self.alpha = 0
+        self.beta = 0
 
         self.cumulative_profit = 0 
 
@@ -96,6 +97,8 @@ class POMDPTEnv(TradingEnv):
         self.entry_price = 0
         self.buy_line = 0
         self.sell_line = 0
+        self.alpha = 0
+        self.beta = 0
 
         # first observation (update lines)
         self._compute_dual_thrust()
@@ -180,9 +183,9 @@ def intraday_greedy_actions(env):
 
     day_len = compute_day_length(env.df)  
 
-    open_prices = env.opens
-    close_prices = env.closes
-    num_steps = len(open_prices)
+    high_prices = env.highs
+    low_prices = env.lows
+    num_steps = len(high_prices)
     actions = np.zeros(num_steps, dtype=int)
 
     i = env.window_size
@@ -190,10 +193,10 @@ def intraday_greedy_actions(env):
         day_start = i
         day_end = min(i + day_len, num_steps)
         
-        day_opens = open_prices[day_start:day_end]
-        day_closes = close_prices[day_start:day_end]
-        idx_min = np.argmin(day_opens).item()  # Buy
-        idx_max = np.argmax(day_closes).item()  # Sell
+        day_high = high_prices[day_start:day_end]
+        day_low = low_prices[day_start:day_end]
+        idx_min = np.argmin(day_high).item()  # Buy
+        idx_max = np.argmax(day_low).item()  # Sell
 
         actions[day_start + idx_min] = 0  # Long
         actions[day_start + idx_max] = 1  # Short

@@ -36,9 +36,9 @@ class PERBuffer:
             self.priorities.pop(0)
 
         episode.obs = torch.tensor(np.array(episode.obs, dtype=np.float32), device=self.device)
-        episode.actions = torch.tensor(np.array(episode.actions, dtype=np.int64), device=self.device)
+        episode.actions = torch.tensor(np.array(episode.actions, dtype=np.float32), device=self.device)
         episode.rewards = torch.tensor(np.array(episode.rewards, dtype=np.float32), device=self.device)
-        episode.expert_actions = torch.tensor(np.array(episode.expert_actions, dtype=np.int64), device=self.device)
+        episode.expert_actions = torch.tensor(np.array(episode.expert_actions, dtype=np.float32), device=self.device)
         episode.dones = torch.tensor(np.array(episode.dones, dtype=bool), device=self.device)
 
         if episode.is_demo:
@@ -105,7 +105,7 @@ class iRDPGAgent(nn.Module):
         
         # Actor
         z_actor, h_actor_next = self.actor_gru(obs, h_actor)
-        action_probs = torch.sigmoid(self.actor_fc(z_actor))
+        action_probs = torch.softmax(self.actor_fc(z_actor), dim=-1)
 
         # Critic
         z_critic, h_critic_next = self.critic_gru(torch.concat([obs, action_probs.detach()], dim=-1), h_critic)
@@ -120,7 +120,7 @@ class iRDPGAgent(nn.Module):
 
         # Target actor
         z_actor, h_actor_next = self.target_actor(obs, h_actor)
-        target_action_probs = torch.sigmoid(self.target_actor_fc(z_actor))
+        target_action_probs = torch.softmax(self.target_actor_fc(z_actor), dim=-1)
 
         # Target critic
         z_critic, h_critic_next = self.target_critic(torch.concat([obs, target_action_probs.detach()], dim=-1).contiguous(), h_critic)
@@ -155,7 +155,7 @@ class iRDPGAgent(nn.Module):
             action = np.clip(action + noise, 0, 1)
 
             
-        return action, h_actor_next
+        return torch.tensor(action, dtype=torch.float32), h_actor_next
     
     def _update_target_networks(self, tau):
         # Polyak averaging
