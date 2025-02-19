@@ -19,7 +19,7 @@ class POMDPTEnv(TradingEnv):
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
-            shape=(4 + 4 * window_size,), # OHLCV + 2 indicators + account
+            shape=(6 + 4 * window_size,), # OHLCV + 4 indicators + account
             dtype=np.float32
             )
         self.action_space = spaces.Box(
@@ -85,18 +85,21 @@ class POMDPTEnv(TradingEnv):
         ]).flatten() # (4 * window_size)
 
         self._compute_dual_thrust()
-        indicators = [self.buy_line, self.sell_line]
+        indicators = [self.buy_line, self.sell_line, self.volume[self.current_step], self.trade_count[self.current_step]]
 
         account = [self.position, self.cumulative_profit]
         return np.concatenate([prices, indicators, account])
     
     def reset(self):
         self.current_step = self.window_size
+
         self.balance = self.initial_balance
         self.position = 0 # 0: no position, 1: long, -1: short
+
         self.entry_price = 0
         self.buy_line = 0
         self.sell_line = 0
+        
         self.alpha = 0
         self.beta = 0
 
@@ -110,6 +113,9 @@ class POMDPTEnv(TradingEnv):
         self.highs = self.df['high'].values
         self.lows  = self.df['low'].values
         self.closes = self.df['close'].values
+
+        self.trade_count = self.df['trade_count'].values
+        self.volume = self.df['volume'].values
 
         self.high_rolling_max  = self.df['high'].rolling(self.window_size).max().values
         self.close_rolling_max = self.df['close'].rolling(self.window_size).max().values
@@ -181,7 +187,7 @@ def dt_policy(env):
 
 def intraday_greedy_actions(env):
 
-    day_len = compute_day_length(env.df)  
+    day_len = 391  
 
     high_prices = env.highs
     low_prices = env.lows
@@ -204,10 +210,3 @@ def intraday_greedy_actions(env):
         i = day_end  
 
     return actions
-
-def compute_day_length(df):
-
-    timestamps = pd.to_datetime(df['timestamp'])
-    time_diffs = timestamps.diff().dropna()
-    day_len = time_diffs[time_diffs > pd.Timedelta(minutes=1)].count()  # Count intraday steps
-    return day_len

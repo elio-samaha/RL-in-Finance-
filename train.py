@@ -17,10 +17,8 @@ from tqdm import trange, tqdm
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
-df = pd.read_csv('data/INTC_1Min_2023-08-01_2024-01-31.csv')
-df = df[:len(df)//6]
-
-
+df = pd.read_csv('data/train_one_month.csv')
+df = df.drop(columns=['timestamp'])
 
 def train(config, env, agent, buffer):
 
@@ -141,6 +139,9 @@ def save_model(agent, filename="trained_irdpg.pth"):
         "target_actor_fc": agent.target_actor_fc.state_dict(),
         "target_critic_gru": agent.target_critic.state_dict(),
         "target_critic_fc": agent.target_critic_fc.state_dict(),
+
+        "actor_optim": agent.actor_optim.state_dict(),
+        "critic_optim": agent.critic_optim.state_dict()
     }
     torch.save(checkpoint, filename)
     print(f"\nModel saved as {filename}\n")
@@ -158,7 +159,7 @@ config = {
     "eps_demo": 0.1,        # Priority boost for demos
     "noise_std": 0.1,       # Exploration noise
     "demo_ratio": 0.3,      # Ratio of demo episodes in buffer
-    "min_demo_episodes": 50, # Min demo episodes to start
+    "min_demo_episodes": 100, # Min demo episodes to start
     "seq_len": 60           # Match window_size
 }
 
