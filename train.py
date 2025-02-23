@@ -18,12 +18,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
 df = pd.read_csv('data/train_one_month.csv')
-df = df.drop(columns=['timestamp'])
 
 def train(config, env, agent, buffer):
 
-    actor_optim = optim.Adam(list(agent.actor_gru.parameters()) + list(agent.actor_fc.parameters()), lr=config["actor_lr"])
-    critic_optim = optim.Adam(list(agent.critic_gru.parameters()) + list(agent.critic_fc.parameters()), lr=config["critic_lr"])
+    actor_params = list(agent.actor_gru.parameters()) + list(agent.actor_fc.parameters())
+    critic_params = list(agent.critic_gru.parameters()) + list(agent.critic_fc.parameters())
+
+    actor_optim = optim.Adam(actor_params, lr=config["actor_lr"])
+    critic_optim = optim.Adam(critic_params, lr=config["critic_lr"])
     
 
     demo_episodes = generate_demonstration_episodes(env, 
@@ -73,22 +75,16 @@ def train(config, env, agent, buffer):
                 current_q = q_values.detach()
 
             action_probs, _, _, _ = agent(obs)
-            
+            action_one_hot = F.one_hot(action_probs.argmax(dim=-1), num_classes=2).float()
             # Policy gradient loss
             actor_loss = -current_q.mean()
             
             # Behavior cloning loss
             mask = (expert_q > current_q).float()
-            bc_loss = F.mse_loss(action_probs, expert_acts.float()) * mask.mean()
+            bc_loss = (F.mse_loss(action_one_hot, expert_acts.float()) * mask).mean()
             
             total_actor_loss = config["lambda1"] * actor_loss + config["lambda2"] * bc_loss
             actor_losses.append(total_actor_loss)
-
-            # Update priorities
-            priority = critic_loss.item() + config["lambda0"] * actor_loss.item()
-            if episode.is_demo:
-                priority += config["eps_demo"]
-            new_priorities.append(priority)
 
         # Update critic
         critic_optim.zero_grad()
@@ -101,6 +97,15 @@ def train(config, env, agent, buffer):
         actor_loss = torch.stack(actor_losses).mean()
         actor_loss.backward()
         actor_optim.step()
+
+        
+        # Update priorities
+        actor_grad_norm = torch.norm(torch.cat([p.grad.view(-1) for p in actor_params])) # Gradient norm
+
+        priority = critic_loss.item() + config["lambda0"] * actor_grad_norm.item()
+        if episode.is_demo:
+            priority += config["eps_demo"]
+        new_priorities.append(priority)
 
         # Update buffer priorities
         buffer.update_priorities(indices, new_priorities)
@@ -117,19 +122,29 @@ def train(config, env, agent, buffer):
             
             save_model(agent, filename=f"trained_irdpg_{epoch+1}.pth")
 
-            os.makedirs("train/images", exist_ok=True)
-            plt.figure()
-            plt.plot(total_critic_losses, label="Critic Loss")
-            plt.plot(total_actor_losses, label="Actor Loss")
-            plt.xlabel("Epoch")
-            plt.ylabel("Loss")
-            plt.legend()
-            plt.savefig("train/images/loss_plot.png")
-            plt.close()
+    os.makedirs("images/train", exist_ok=True)
+    plt.figure()
+    plt.plot(total_critic_losses, label="Critic Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.savefig("images/train/critic_loss_plot.png")
+    plt.close()
+
+    plt.figure()
+    plt.plot(total_actor_losses, label="Actor Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.savefig("images/train/actor_loss_plot.png")
+    plt.close()
 
             
 
 def save_model(agent, filename="trained_irdpg.pth"):
+    path_dir = "models/"
+    os.makedirs(path_dir, exist_ok=True)
+
     checkpoint = {
         "actor_gru": agent.actor_gru.state_dict(),
         "actor_fc": agent.actor_fc.state_dict(),
@@ -139,11 +154,8 @@ def save_model(agent, filename="trained_irdpg.pth"):
         "target_actor_fc": agent.target_actor_fc.state_dict(),
         "target_critic_gru": agent.target_critic.state_dict(),
         "target_critic_fc": agent.target_critic_fc.state_dict(),
-
-        "actor_optim": agent.actor_optim.state_dict(),
-        "critic_optim": agent.critic_optim.state_dict()
     }
-    torch.save(checkpoint, filename)
+    torch.save(checkpoint, path_dir+filename)
     print(f"\nModel saved as {filename}\n")
 
 config = {
@@ -159,13 +171,13 @@ config = {
     "eps_demo": 0.1,        # Priority boost for demos
     "noise_std": 0.1,       # Exploration noise
     "demo_ratio": 0.3,      # Ratio of demo episodes in buffer
-    "min_demo_episodes": 100, # Min demo episodes to start
-    "seq_len": 60           # Match window_size
+    "min_demo_episodes": 50, # Min demo episodes to start
+    "seq_len": 1          # Match window_size
 }
 
-env = POMDPTEnv(df)
+env = POMDPTEnv(df, window_size=config["seq_len"])
 agent = iRDPGAgent(obs_dim=env.observation_space.shape[0], device=device)
-buffer = PERBuffer(max_episodes=100)
+buffer = PERBuffer(max_episodes=75)
 
 train(config, env, agent, buffer)
 

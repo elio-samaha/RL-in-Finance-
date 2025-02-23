@@ -149,7 +149,7 @@ class iRDPGAgent(nn.Module):
             action_probs, _, h_actor_next, _ = self.forward(obs, h_actor)
             
         action = action_probs.squeeze(0).cpu().numpy()
-
+        
         if add_noise:
             noise = np.random.normal(0, 0.1, size=action.shape)
             action = np.clip(action + noise, 0, 1)
@@ -167,6 +167,7 @@ class iRDPGAgent(nn.Module):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
         for target_param, param in zip(self.target_critic_fc.parameters(), self.critic_fc.parameters()):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+            
 
 def generate_demonstration_episodes(env, n_episodes=50):
     episodes = []
@@ -175,18 +176,6 @@ def generate_demonstration_episodes(env, n_episodes=50):
         episode = Episode()
         episode.is_demo = True
         done = False
-
-        expert_action = intraday_greedy_actions(env)
-
-        expert_action_one_hot = np.zeros((len(expert_action), 2), dtype=np.float32)
-        for i, a in enumerate(expert_action):
-            if a == 0:
-                expert_action_one_hot[i] = [1.0, 0.0]
-            elif a == 1:
-                expert_action_one_hot[i] = [0.0, 1.0]
-            else:
-                raise ValueError(f"Invalid action: {a}")
-        
         
         while not done:
             action = dt_policy(env)
@@ -195,11 +184,12 @@ def generate_demonstration_episodes(env, n_episodes=50):
             episode.obs.append(obs)
             episode.actions.append(action)
             episode.rewards.append(reward)
-            episode.expert_actions.append(expert_action_one_hot[env.current_step-1])
+            episode.expert_actions.append(np.zeros(2, dtype=np.float32))
             episode.dones.append(done)
         
         episodes.append(episode)
     return episodes
+
 
 def collect_episode(env, agent, add_noise):
     env.reset()
