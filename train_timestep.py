@@ -17,7 +17,7 @@ from tqdm import trange, tqdm
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
-df = pd.read_csv('data/train_one_month.csv')
+df = pd.read_csv('data/train_six_months.csv')
 
 def train(config, env, agent, buffer):
 
@@ -54,6 +54,7 @@ def train(config, env, agent, buffer):
         critic_losses = []
         actor_losses = []
         new_priorities = []
+        actor_gradients = []
 
         # Process episodes
         for i, episode in enumerate(batch):
@@ -76,7 +77,7 @@ def train(config, env, agent, buffer):
                 ob_t = obs[:, t, :]
                 action_t = actions[:, t, :]
                 reward_t = rewards[:, t, :]
-                expert_act_t = expert_acts[:, t, :]
+                expert_act_t = expert_acts[:, t]
                 done_t = dones[:, t, :]
 
                 if t < T-1:
@@ -90,6 +91,16 @@ def train(config, env, agent, buffer):
 
                 q_values_t, h_critic = agent.critic_forward(ob_t, action_t, h_critic)
 
+                # Compute ∇_a Q
+                action_t_perturbed = action_t.detach().clone().requires_grad_(True)
+                q_values_t_perturbed, h_critic = agent.critic_forward(ob_t, action_t_perturbed, h_critic)
+                q_values_t_perturbed.mean().backward(retain_graph=True)
+                actor_grad_t = action_t_perturbed.grad.data.abs().mean()
+                actor_grad_t = torch.nan_to_num(actor_grad_t, nan=0.0)
+                actor_gradients.append(actor_grad_t.item())
+                # Cleanup
+                action_t_perturbed.grad = None
+
                 # Critic loss
                 critic_loss_t = F.mse_loss(q_values_t, target_q_t, reduction="none")
                 critic_loss_t = (critic_loss_t * weights[i]).mean()
@@ -98,20 +109,21 @@ def train(config, env, agent, buffer):
                 action_probs_t, h_actor = agent(ob_t, h_actor)
                 action_one_hot_t = F.gumbel_softmax(action_probs_t, tau=1, hard=True) # Ensure differentiability
 
-                current_q_t = q_values_t.detach()
+                with torch.no_grad(): # Detach from graph
+                    current_q_t = q_values_t.detach()
 
                 actor_loss_t = -current_q_t.mean()
 
-                if not episode.is_demo:
-                    # Behavior cloning loss
+                if not torch.isnan(expert_act_t).any():
                     with torch.no_grad():
                         expert_q_t, _ = agent.critic_forward(ob_t, expert_act_t, h_critic)
-                    mask_t = (expert_q_t > current_q_t).float()
-                    bc_loss_t = (F.mse_loss(action_one_hot_t, expert_act_t.float()) * mask_t).mean()
-                else:
-                    bc_loss_t = torch.tensor(0.0, device=device)
 
-                total_actor_loss_t = config["lambda1"] * actor_loss_t + config["lambda2"] * bc_loss_t
+                    mask_t = (expert_q_t > current_q_t).float()
+                    bc_loss_t = (F.mse_loss(action_one_hot_t, expert_act_t.float(), reduction="none") * mask_t).mean()
+
+                    total_actor_loss_t = config["lambda1"] * actor_loss_t + config["lambda2"] * bc_loss_t
+                else:
+                    total_actor_loss_t = config["lambda1"] * actor_loss_t
 
                 # Update episode losses
                 ep_critic_loss += critic_loss_t
@@ -135,20 +147,15 @@ def train(config, env, agent, buffer):
         actor_optim.zero_grad()
         actor_loss = torch.stack(actor_losses).mean()
         actor_loss.backward()
-
-        actor_grad_norm = torch.norm(torch.cat([p.grad.view(-1) for p in actor_params])) # Gradient norm
-
         actor_optim.step()
 
         # Update priorities
         for i, episode in enumerate(batch):
-            ep_loss = critic_losses[i].detach().item()
-            ep_priority = actor_grad_norm.item() * config['lambda0'] + ep_loss
-
+            ep_loss = critic_losses[i].detach().item() * T
+            ep_priority = np.mean(actor_gradients[i]) * config['lambda0'] + ep_loss
             if episode.is_demo:
                 ep_priority += config["eps_demo"]
             new_priorities.append(ep_priority)
-
         # Update buffer priorities
         buffer.update_priorities(indices, new_priorities)
         
@@ -159,18 +166,18 @@ def train(config, env, agent, buffer):
         total_actor_losses.append(actor_loss.item())
 
         if (epoch+1) % (config['epochs']/5) == 0:
-            print(f"Epoch {epoch+1} | Critic Loss: {critic_loss.item():.4f} | "
-                  f"Actor Loss: {actor_loss.item():.4f}")
+            print(f"Epoch {epoch+1} | Critic Loss: {critic_loss.item():.6f} | "
+                  f"Actor Loss: {actor_loss.item():.6f}")
             
             save_model(agent, filename=f"trained_irdpg_{epoch+1}.pth", run_folder=run_folder)
 
-    os.makedirs("images/train", exist_ok=True)
+    os.makedirs("models"+run_folder+"images/train", exist_ok=True)
     plt.figure()
     plt.plot(total_critic_losses, label="Critic Loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
-    plt.savefig("images/train/critic_loss_plot.png")
+    plt.savefig("models"+run_folder+"images/train/critic_loss_plot.png")
     plt.close()
 
     plt.figure()
@@ -178,13 +185,12 @@ def train(config, env, agent, buffer):
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
-    plt.savefig("images/train/actor_loss_plot.png")
+    plt.savefig("models"+run_folder+"images/train/actor_loss_plot.png")
     plt.close()
 
             
-
 def save_model(agent, filename="trained_irdpg.pth", run_folder=""):
-    path_dir = "models/" + run_folder
+    path_dir = run_folder
     os.makedirs(path_dir, exist_ok=True)
 
     checkpoint = {
@@ -197,7 +203,7 @@ def save_model(agent, filename="trained_irdpg.pth", run_folder=""):
         "target_critic_gru": agent.target_critic.state_dict(),
         "target_critic_fc": agent.target_critic_fc.state_dict(),
     }
-    torch.save(checkpoint, path_dir+filename)
+    torch.save(checkpoint, path_dir+'/'+filename)
     print(f"\nModel saved as {filename}\n")
 
 def get_model_folder(base_dir="models/"):
@@ -213,7 +219,7 @@ def get_model_folder(base_dir="models/"):
 
 config = {
     "epochs": 500,          # Total training epochs
-    "batch_size": 32,       # Episodes per batch
+    "batch_size": 128,       # Episodes per batch
     "gamma": 0.99,          # Discount factor
     "tau": 0.001,            # Target network update rate
     "lambda0": 0.6,         # Priority weight

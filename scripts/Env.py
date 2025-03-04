@@ -52,7 +52,7 @@ class POMDPTEnv(TradingEnv):
     def _preprocess_df(self, df):
         
         df = df.copy()
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         df.set_index('timestamp', inplace=True)
 
         df['date'] = df.index.date
@@ -227,26 +227,41 @@ def dt_policy(env):
     
 
 def intraday_greedy_actions(env):
-
     day_len = 390
 
-    low_prices = env.lows
-    high_prices = env.highs
-    num_steps = len(low_prices)
+    open_prices = env.opens 
+    close_prices = env.closes
+    num_steps = len(open_prices)
     actions = np.zeros(num_steps, dtype=int)
-
-    i = env.window_size
-    while i < (num_steps - 1):
-        day_start = i
-        day_end = min(i + day_len, num_steps)
+    
+    current_action = 0 
+    
+    for day_start in range(0, num_steps, day_len):
+        day_end = min(day_start + day_len, num_steps)
         
-        day_lows = low_prices[day_start:day_end]
-        day_highs = high_prices[day_start:day_end]
-        idx_min = np.argmin(day_lows)
-        idx_max = np.argmax(day_highs)
-
-        actions[day_start + idx_min] = 0
-        actions[day_start + idx_max] = 1
+        day_opens = open_prices[day_start:day_end]
+        day_closes = close_prices[day_start:day_end]
         
-        i = day_end  # Move to next day
+        if len(day_opens) == 0:
+            continue
+        
+        idx_long = day_start + np.argmin(day_opens) 
+        idx_short = day_start + np.argmax(day_closes)
+        
+        for t in range(day_start, day_end):
+
+            if t == idx_long:
+                current_action = 1
+            elif t == idx_short:
+                current_action = -1
+            
+            actions[t] = current_action
+
+    if actions[0] == 0:
+        actions[0] = 1
+
+    for t in range(1, num_steps):
+        if actions[t] == 0:
+            actions[t] = actions[t-1]
+    
     return actions
