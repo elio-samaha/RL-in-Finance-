@@ -1,5 +1,5 @@
 # RL-in-Finance-
 
-**Authors**: Elio Samaha, Mattia Martino, Lara Hofman, Sandro Mikautadze
+**Authors**: HOLRV DPDKD PDWWL DPDUW LQROD UDKRI PDQVD QGURP LNDXW DGCH
 
 Work in progress...
