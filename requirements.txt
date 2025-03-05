@@ -1,0 +1,9 @@
+pandas
+matplotlib
+numpy
+torch
+tqdm
+gym
+gym-trading-env
+alpaca-py
+dotenv

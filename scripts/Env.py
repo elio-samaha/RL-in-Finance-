@@ -6,7 +6,7 @@ from gym_trading_env.environments import TradingEnv
 
 class POMDPTEnv(TradingEnv):
     def __init__(self, df, window_size=5, 
-                 initial_balance=100_000,
+                 initial_balance=1_000,
                  transaction_cost=2.3e-5, 
                  slippage=0.2, 
                  eta=0.01, 
@@ -17,6 +17,9 @@ class POMDPTEnv(TradingEnv):
 
         self.window_size = window_size
         self.initial_balance = initial_balance
+
+        self.current_day = None
+        self.day_indices = []
 
         self.transaction_cost = transaction_cost
         self.slippage = slippage
@@ -79,9 +82,10 @@ class POMDPTEnv(TradingEnv):
         df['BuyLine'] = df['BuyLine'].ffill()
         df['SellLine'] = df['SellLine'].ffill()
 
-        self.first_valid_idx = daily_df.index[self.window_size] # Index of the first valid observation
+        self.first_valid_day = daily_df.index[self.window_size]
+        self.valid_days = df[df['date'] >= self.first_valid_day]['date'].unique()
 
-        return df.drop(columns=['date'])
+        return df
 
         
     def _compute_dual_thrust(self):
@@ -108,8 +112,8 @@ class POMDPTEnv(TradingEnv):
 
 
     def _next_observation(self):
-        start_idx = self.current_step - self.window_size
-        end_idx   = self.current_step
+        start_idx = max(0, self.current_step - self.window_size)
+        end_idx = self.current_step
         
         prices = np.array([
             self.opens[start_idx:end_idx],
@@ -129,10 +133,21 @@ class POMDPTEnv(TradingEnv):
         return np.concatenate([prices, indicators, account])
     
     def reset(self):
-        self.current_step = np.where(self.df.index.date >= self.first_valid_idx)[0][0]
+        # Select a random day
+        self.current_day = np.random.choice(self.valid_days)
+        self.day_indices = np.where(self.dates == self.current_day)[0]
+
+        if len(self.day_indices) == 0:
+            # Fallback to first valid day
+            self.current_day = self.valid_days[0]
+            self.day_indices = np.where(self.dates == self.current_day)[0]
+        
+        self.day_start = self.day_indices[0]
+        self.day_end = self.day_indices[-1]
+        self.current_step = self.day_start
 
         self.balance = self.initial_balance
-        self.position = 0 # 0: no position, 1: long, -1: short
+        self.position = 0
 
         self.entry_price = 0
         self.buy_line = 0
@@ -141,12 +156,10 @@ class POMDPTEnv(TradingEnv):
         self.alpha = 1e-6
         self.beta = 1e-6
 
-        # first observation (update lines)
         self._compute_dual_thrust()
         return self._next_observation()
 
     def vectorize(self):
-        
         self.opens = self.df['open'].values
         self.highs = self.df['high'].values
         self.lows  = self.df['low'].values
@@ -158,52 +171,51 @@ class POMDPTEnv(TradingEnv):
         self.buy_lines = self.df['BuyLine'].values
         self.sell_lines = self.df['SellLine'].values
 
+        self.dates = self.df['date'].values
 
     def step(self, action):
-            done = False
-            if self.current_step >= len(self.df) - 1:
-                done = True
+        done = False
+        if self.current_step >= self.day_end:
+            done = True
 
-            prev_position = self.position
-            desired_position = 1 if action[0] > action[1] else -1
+        prev_position = self.position
+        desired_position = 1 if action[0] > action[1] else -1
 
-            price_open = self.opens[self.current_step]
-            price_close = self.closes[self.current_step]
-            prev_close = self.closes[self.current_step-1] if self.current_step > 0 else price_close
+        price_open = self.opens[self.current_step]
+        price_close = self.closes[self.current_step]
+        prev_close = self.closes[self.current_step-1] if self.current_step > 0 else price_close
 
-            # Eq (1)
-            rt = (price_close - prev_close - 2 * self.slippage) * prev_position
+        # Eq (1)
+        rt = (price_close - prev_close - 2 * self.slippage) * prev_position
 
-            if desired_position != prev_position and prev_position != 0:
-                rt -= abs(prev_position) * self.transaction_cost * price_close
-                self.position = 0
-            
-            if desired_position != prev_position:
-                rt -= abs(desired_position) * self.transaction_cost * price_close
-                self.position = desired_position
-                self.entry_price = price_open
+        if desired_position != prev_position and prev_position != 0:
+            rt -= abs(prev_position) * self.transaction_cost * price_close
+            self.position = 0
+        
+        if desired_position != prev_position:
+            rt -= abs(desired_position) * self.transaction_cost * price_close
+            self.position = desired_position
+            self.entry_price = price_open
 
-            self.balance += rt
-            self.cumulative_profit += rt
-            
-            dsr = self._compute_differential_sharpe_ratio(rt)
+        self.balance += rt
+        self.cumulative_profit += rt
+        
+        dsr = self._compute_differential_sharpe_ratio(rt)
 
-            # next step
-            self.current_step += 1
-            if self.current_step < len(self.df):
-                self._compute_dual_thrust()
-                obs = self._next_observation()
-            else:
-                obs = np.zeros(self.observation_space.shape[0], dtype=np.float32)
-            
-            if self.balance <= 0.5 * self.initial_balance:
-                done = True
-            
-            return obs, dsr, done, {}
-    
+        # next step
+        self.current_step += 1
+        if self.current_step < len(self.df):
+            self._compute_dual_thrust()
+            obs = self._next_observation()
+        else:
+            obs = np.zeros(self.observation_space.shape[0], dtype=np.float32)
+        
+        if self.balance <= 0.5 * self.initial_balance:
+            done = True
+        
+        return obs, dsr, done, {}
 
 # POLICIES
-
 def dt_policy(env):
 
     buy_line = env.buy_lines[env.current_step]
@@ -227,10 +239,12 @@ def dt_policy(env):
     
 
 def intraday_greedy_actions(env):
+
+    day_indices = env.day_indices
     day_len = 390
 
-    open_prices = env.opens 
-    close_prices = env.closes
+    open_prices = env.opens[day_indices] 
+    close_prices = env.closes[day_indices]
     num_steps = len(open_prices)
     actions = np.zeros(num_steps, dtype=int)
     
