@@ -1,4 +1,5 @@
 import copy
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -10,12 +11,31 @@ class iRDPGAgent(nn.Module):
                  action_dim=2, 
                  hidden_dim=64, 
                  tau=0.001,
+                 encoder_type="gru",
                  device="cuda"):
         super().__init__()
 
-        # GRU encoder
-        self.gru = nn.GRU(action_dim + obs_dim, hidden_dim, batch_first=True).to(device)
+        self.encoder_type = encoder_type
 
+        # GRU encoder
+        if self.encoder_type=='gru':
+            self.encoder = nn.GRU(action_dim + obs_dim, hidden_dim, batch_first=True).to(device)
+            
+        elif self.encoder_type=='transformer':
+            # Projection layer
+            self.input_projection = nn.Linear(obs_dim + action_dim, hidden_dim).to(device)
+            # Positional encoding
+            self.positional_encoding = PositionalEncoding(hidden_dim).to(device)
+            # Transformer encoder
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim, 
+                nhead=4, 
+                dim_feedforward=hidden_dim,
+                batch_first=True)
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=2).to(device)
+        else:
+            raise ValueError(f"Unknown encoder type: {encoder_type}")
+        
         # Actor
         self.actor_gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True).to(device)
         self.actor_fc = nn.Linear(hidden_dim, action_dim).to(device) # [P long, P short]
@@ -39,6 +59,30 @@ class iRDPGAgent(nn.Module):
         self.device = device
         self.action_dim = action_dim
         self.obs_dim = obs_dim
+
+    def encode(self, x, h_t):
+        x = x.unsqueeze(0).to(self.device)
+        h_t = h_t.unsqueeze(0).to(self.device) if h_t is not None else None
+
+        if self.encoder_type == 'gru':
+            _, h = self.encoder(x)
+            return h
+        elif self.encoder_type == 'transformer':
+
+            x = self.input_projection(x)
+
+            if h_t is None:
+                memory = x
+            else:
+                memory = torch.concat([h_t, x], dim=1)
+
+            x = self.positional_encoding(memory)
+            x = x.transpose(0, 1)  # [batch_size, hidden_dim, seq_len]
+            x = self.encoder(x)
+            x = x.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
+
+            return x[:, -1, :]  # Return the last hidden state
+
 
     def actor_forward(self, obs, h_actor=None):
         obs = obs.to(self.device)
@@ -76,7 +120,7 @@ class iRDPGAgent(nn.Module):
         return target_action_probs, target_q_value, h_actor_next, h_critic_next
         
     
-    def act(self, obs, prev_action=None, h_actor=None):
+    def act(self, obs, prev_action=None, h_t=None, h_actor=None):
 
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
         h_actor = h_actor.to(self.device) if h_actor is not None else None
@@ -87,7 +131,7 @@ class iRDPGAgent(nn.Module):
             prev_action = torch.tensor(prev_action, dtype=torch.float32, device=self.device).unsqueeze(0)
 
         with torch.no_grad():
-            _, h_t = self.gru(torch.cat([obs, prev_action], dim=-1), h_actor)
+            h_t = self.encode(torch.cat([obs, prev_action], dim=-1), h_t)
             action_probs, h_actor_next = self.actor_forward(h_t, h_actor)
             
         action = action_probs.squeeze(0).cpu().numpy()
@@ -104,5 +148,20 @@ class iRDPGAgent(nn.Module):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
         for target_param, param in zip(self.target_critic_fc.parameters(), self.critic_fc.parameters()):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+
             
-            
+class PositionalEncoding(nn.Module):
+    def __init__(self, model_dim, dropout=0.1, max_len=5000, device="cuda"):
+        super(PositionalEncoding, self).__init__()
+        self.model_dim = model_dim
+        self.max_len = max_len
+        self.dropout = nn.Dropout(p=dropout)
+        
+        self.pe = torch.zeros(max_len, model_dim, device=device)
+        position = torch.arange(0, max_len).unsqueeze(1).float()
+        self.pe[:, 0::2] = torch.sin(np.pi * position / (max_len - 1))
+        self.pe[:, 1::2] = torch.cos(np.pi/2 + np.pi * position / (max_len - 1))
+        
+    def forward(self, x):
+        x = x + self.pe[:x.size(1), :]
+        return self.dropout(x)     

@@ -19,15 +19,17 @@ def save_model(agent, filename="trained_irdpg.pth", checkpoint_folder=""):
     torch.save(checkpoint, save_path)
     print(f"\nModel saved as {save_path}\n")
 
-def get_model_folder(base_dir="models/"):
+def get_model_folder(base_dir="models/", folder_name=None):
     os.makedirs(base_dir, exist_ok=True)
-    
-    existing_runs = sorted(
-        [d for d in os.listdir(base_dir) if d.isdigit()],
-        key=lambda x: int(x)
-    )
-    next_run_number = 1 if not existing_runs else int(existing_runs[-1]) + 1
-    run_folder = os.path.join(base_dir, f"{next_run_number:02d}")
+    if folder_name is None:
+        existing_runs = sorted(
+            [d for d in os.listdir(base_dir) if d.isdigit()],
+            key=lambda x: int(x)
+        )
+        next_run_number = 1 if not existing_runs else int(existing_runs[-1]) + 1
+        folder_name = f"{next_run_number:02d}"
+
+    run_folder = os.path.join(base_dir, folder_name)
     os.makedirs(run_folder, exist_ok=True)
     
     checkpoint_folder = os.path.join(run_folder, "checkpoint")

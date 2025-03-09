@@ -19,10 +19,10 @@ print(f"Device: {device}")
 
 df = pd.read_csv('data/train_one_month.csv')
 
-def train(config, env, agent, buffer):
+def train(config, env, agent, buffer, model_folder=None):
 
     # Save model folder
-    run_folder = get_model_folder()
+    run_folder = get_model_folder(folder_name=model_folder)
 
     actor_params = list(agent.actor_gru.parameters()) + list(agent.actor_fc.parameters())
     critic_params = list(agent.critic_gru.parameters()) + list(agent.critic_fc.parameters())
@@ -88,13 +88,13 @@ def train(config, env, agent, buffer):
                     ob_next = torch.zeros_like(ob_t)
 
                 # Hidden state ebedding
-                gru_input = torch.concat([ob_t, action_prev], dim=-1)
-                _, h_t = agent.gru(gru_input, h_t)
+                encoder_input = torch.concat([ob_t, action_prev], dim=-1)
+                h_t = agent.encode(encoder_input, h_t)
 
                 # --Target Q--
                 with torch.no_grad():
-                    next_gru_input = torch.concat([ob_next, action_t], dim=-1)
-                    _, h_next = agent.gru(next_gru_input, h_t.clone().detach())
+                    next_encoder_input = torch.concat([ob_next, action_t], dim=-1)
+                    h_next = agent.encode(next_encoder_input, h_t)
 
                     _, target_q_t, _, _ = agent.target_forward(h_next)
                     target_q_t = reward_t + (1 - done_t.float()) * config["gamma"] * target_q_t
@@ -242,9 +242,18 @@ config = {
     "seq_len": 5          # Match window_size
 }
 
-env = POMDPTEnv(df, window_size=config["seq_len"])
-agent = iRDPGAgent(obs_dim=env.observation_space.shape[0], device=device)
-buffer = PERBuffer(max_episodes=20)
+# Define the input parameters:
+model_folder = input("Folder name for the model: ")
+if model_folder == "":
+    model_folder = None
+encoder = input("Encoder (defaults to gru): ")
+if encoder == "":
+    encoder = "gru"
 
-train(config, env, agent, buffer)
+# Define the model
+env = POMDPTEnv(df, window_size=config["seq_len"])
+agent = iRDPGAgent(obs_dim=env.observation_space.shape[0], encoder_type=encoder, device=device)
+buffer = PERBuffer(max_episodes=15)
+
+train(config, env, agent, buffer, model_folder=model_folder)
 
