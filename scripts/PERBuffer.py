@@ -115,7 +115,7 @@ def collect_episode(env, agent):
     while not done:
         obs = env._next_observation()
         action, h_actor = agent.act(obs, prev_action, h_actor)
-        
+
         next_obs, reward, done, _ = env.step(action)
         
         episode.obs.append(obs)

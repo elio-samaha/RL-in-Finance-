@@ -33,6 +33,17 @@ class iRDPGAgent(nn.Module):
                 dim_feedforward=hidden_dim,
                 batch_first=True)
             self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=2).to(device)
+
+        elif self.encoder_type=='lstm':
+            self.encoder = nn.LSTM(action_dim + obs_dim, hidden_dim, batch_first=True).to(device)
+
+        elif self.encoder_type=='mlp':
+            self.encoder = nn.Sequential(
+                nn.Linear(obs_dim + action_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            ).to(device)
+            
         else:
             raise ValueError(f"Unknown encoder type: {encoder_type}")
         
@@ -67,6 +78,7 @@ class iRDPGAgent(nn.Module):
         if self.encoder_type == 'gru':
             _, h = self.encoder(x)
             return h
+        
         elif self.encoder_type == 'transformer':
 
             x = self.input_projection(x)
@@ -82,6 +94,15 @@ class iRDPGAgent(nn.Module):
             x = x.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
 
             return x[:, -1, :]  # Return the last hidden state
+        
+        elif self.encoder_type == 'lstm':
+            if h_t is None:
+                _, (h, c) = self.encoder(x, None)
+            else:
+                h_t = h_t.squeeze(0)
+                c_t = torch.zeros_like(h_t).to(self.device)
+                _, (h, c) = self.encoder(x, (h_t, c_t))
+            return h
 
 
     def actor_forward(self, obs, h_actor=None):
@@ -133,10 +154,8 @@ class iRDPGAgent(nn.Module):
         with torch.no_grad():
             h_t = self.encode(torch.cat([obs, prev_action], dim=-1), h_t)
             action_probs, h_actor_next = self.actor_forward(h_t, h_actor)
-            
-        action = action_probs.squeeze(0).cpu().numpy()
-
-        return torch.tensor(action, dtype=torch.float32), h_actor_next
+            action_probs = action_probs.squeeze(0).squeeze(0).cpu().numpy()
+        return action_probs, h_actor_next
     
     def _update_target_networks(self, tau):
         # Polyak averaging

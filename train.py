@@ -136,10 +136,10 @@ def train(config, env, agent, buffer, model_folder=None):
 
                 if not torch.isnan(expert_act_t).any():
                     with torch.no_grad():
-                        expert_q_t, _ = agent.critic_forward(h_t, expert_act_t)
+                        expert_q_t, _ = agent.critic_forward(h_t, expert_act_t.unsqueeze(0))
 
                     mask_t = (expert_q_t > current_q_t).float()
-                    bc_loss_t = (F.mse_loss(action_probs_t, expert_act_t.float(), reduction="none") * mask_t).mean()
+                    bc_loss_t = (F.mse_loss(action_probs_t.squeeze(0), expert_act_t.float(), reduction="none") * mask_t).mean()
 
                     total_actor_loss_t = config["lambda1"] * actor_loss_t + config["lambda2"] * bc_loss_t
                 else:
