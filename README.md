@@ -1,1 +1,7 @@
-Adaptive quant trading
+# Adaptive Quantitative Trading with Imitative Recurrent Deterministic Policy Gradient
+
+**Authors**: Lara Hofman, Mattia Martino, Sandro Mikautadze, Elio Samaha
+
+# Abstract
+
+This report investigates the application of imitative Recurrent Deterministic Policy Gradient (iRDPG) to the problem of quantitative trading (QT) in high-frequency financial markets. We adapt the Recurrent Deterministic Policy Gradient (RDPG) framework, enhanced with imitation learning techniques, to develop an adaptive trading agent. The inherent challenges of QT, including noisy and non-stationary market data, and the critical balance between exploration and exploitation in reinforcement learning, are addressed. We model the QT process as a Partially Observable Markov Decision Process (POMDP) to account for the unobservable true market state. Imitation learning, specifically through a demonstration buffer initialized with the Dual Thrust strategy and behavior cloning, is incorporated to guide the agent's learning and mitigate inefficient random exploration. We employ Gated Recurrent Units (GRUs) (along with LSTM and Transformer variants for comparison) to capture temporal dependencies in the financial data, creating a history representation that informs both the policy (actor) and value (critic) networks. The system is trained and evaluated on real-world, minute-frequency data from the Intel Corporation stock for 2024. Our experimental results compare the performance of the baseline Dual Thrust strategy, the iRDPG agent with GRU/LSTM/Transformer encoders, and discuss training stability, trading metrics, and limitations. 
