@@ -1,5 +1,5 @@
 # **Adaptive Quantitative Trading with Imitative Recurrent Deterministic Policy Gradient**
-Authors: *Lara Hofman, Mattia Martino, Sandro Mikautadze, Elio Samaha*
+Authors: *Lara Hofman, Sandro Mikautadze, Mattia Martino, Elio Samaha*
 
 ## Setup and code structure
 This repository contains the code for the report "Adaptive Quantitative Trading with Imitative Recurrent Deterministic Policy Gradient". The required packeges are listed in the `requirements.txt` file. To install them, run the following command:
