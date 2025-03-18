@@ -18,6 +18,7 @@ def save_model(agent, filename="trained_irdpg.pth", checkpoint_folder=""):
     save_path = os.path.join(checkpoint_folder, filename)
     torch.save(checkpoint, save_path)
     print(f"\nModel saved as {save_path}\n")
+    
 
 def get_model_folder(base_dir="models/", folder_name=None):
     os.makedirs(base_dir, exist_ok=True)
